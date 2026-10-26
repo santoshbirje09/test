@@ -1,0 +1,137 @@
+{
+  "$schema": "https://azure.com",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "[deployment().location]",
+      "metadata": { "description": "The Azure region for deployment." }
+    },
+    "saasApplicationClientId": {
+      "type": "string",
+      "metadata": { "description": "The Client ID of your Multi-Tenant SaaS App Registration." }
+    },
+    "aksResourceGroupName": {
+      "type": "string",
+      "metadata": { "description": "The Resource Group name where your K8s cluster will be managed." }
+    },
+    "aksClusterName": {
+      "type": "string",
+      "metadata": { "description": "The name assigned to the managed AKS cluster." }
+    }
+  },
+  "variables": {
+    "identityName": "SaaS-K8sOrchestrator-Identity",
+    "customRoleName": "[format('SaaS-DataCluster-Manager-{0}', uniqueString(subscription().subscriptionId))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/resourceGroups",
+      "apiVersion": "2023-07-01",
+      "name": "[parameters('aksResourceGroupName')]",
+      "location": "[parameters('location')]",
+      "properties": {}
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2023-07-01",
+      "name": "saas-identity-and-roles-deployment",
+      "resourceGroup": "[parameters('aksResourceGroupName')]",
+      "dependsOn": [
+        "[parameters('aksResourceGroupName')]"
+      ],
+      "properties": {
+        "mode": "Incremental",
+        "template": {
+          "$schema": "https://azure.com",
+          "contentVersion": "1.0.0.0",
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleDefinitions",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(subscription().subscriptionId, variables('customRoleName'))]",
+              "properties": {
+                "roleName": "[variables('customRoleName')]",
+                "description": "Custom role allowing minimal Databricks-like K8s infrastructure and data pod orchestration.",
+                "type": "CustomRole",
+                "permissions": [
+                  {
+                    "actions": [
+                      "Microsoft.ContainerService/managedClusters/*",
+                      "Microsoft.Compute/virtualMachines/*",
+                      "Microsoft.Compute/virtualMachineScaleSets/*",
+                      "Microsoft.Network/virtualNetworks/*",
+                      "Microsoft.Network/networkInterfaces/*",
+                      "Microsoft.ManagedIdentity/userAssignedIdentities/*",
+                      "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/*",
+                      "Microsoft.Authorization/roleAssignments/write",
+                      "Microsoft.Authorization/roleAssignments/delete"
+                    ],
+                    "notActions": [],
+                    "dataActions": [
+                      "Microsoft.ContainerService/managedClusters/pods/*",
+                      "Microsoft.ContainerService/managedClusters/jobs/*",
+                      "Microsoft.ContainerService/managedClusters/namespaces/*"
+                    ],
+                    "notDataActions": []
+                  }
+                ],
+                "assignableScopes": [
+                  "[subscription().id]"
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[variables('identityName')]",
+              "location": "[parameters('location')]"
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName')), 'customRoleAssignment'))]",
+              "dependsOn": [
+                "[variables('identityName')]",
+                "[guid(subscription().subscriptionId, variables('customRoleName'))]"
+              ],
+              "properties": {
+                "roleDefinitionId": "[tenantResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().subscriptionId, variables('customRoleName')))]",
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName')), '2023-01-31').principalId]",
+                "principalType": "ServicePrincipal"
+              }
+            },
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
+              "apiVersion": "2023-01-31",
+              "name": "[format('{0}/SaaSDataOrchestrationTrust', variables('identityName'))]",
+              "dependsOn": [
+                "[variables('identityName')]"
+              ],
+              "properties": {
+                "issuer": "[format('https://microsoftonline.com{0}/v2.0', tenant().tenantId)]",
+                "subject": "[parameters('saasApplicationClientId')]",
+                "audiences": [
+                  "api://AzureADTokenExchange"
+                ]
+              }
+            }
+          ],
+          "outputs": {
+            "clientId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName')), '2023-01-31').clientId]"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "azureTenantId": { "type": "string", "value": "[tenant().tenantId]" },
+    "azureSubscriptionId": { "type": "string", "value": "[subscription().subscriptionId]" },
+    "managedIdentityClientId": { "type": "string", "value": "[reference('saas-identity-and-roles-deployment').outputs.clientId.value]" },
+    "targetResourceGroup": { "type": "string", "value": "[parameters('aksResourceGroupName')]" },
+    "targetClusterName": { "type": "string", "value": "[parameters('aksClusterName')]" }
+  }
+}
