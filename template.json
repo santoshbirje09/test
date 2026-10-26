@@ -1,5 +1,5 @@
 {
-  "$schema": "https://azure.com",
+  "$schema": "https://schema.management.azure.com/schema/2018-05-01/subscriptionDeploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "parameters": {
     "location": {
@@ -7,9 +7,13 @@
       "defaultValue": "[deployment().location]",
       "metadata": { "description": "The Azure region for deployment." }
     },
-    "saasApplicationClientId": {
+    "saasTenantId": {
       "type": "string",
-      "metadata": { "description": "The Client ID of your Multi-Tenant SaaS App Registration." }
+      "metadata": { "description": "Tenant ID of the SaaS vendor (the tenant that issues the token your backend presents)." }
+    },
+    "saasServicePrincipalObjectId": {
+      "type": "string",
+      "metadata": { "description": "Object ID (not client ID) of the SaaS app's service principal in the vendor tenant. This is the 'sub' claim of the token it presents." }
     },
     "aksResourceGroupName": {
       "type": "string",
@@ -20,13 +24,17 @@
       "metadata": { "description": "The name assigned to the managed AKS cluster." }
     },
     "saasWebhookUrl": {
-      "type": "string",
+      "type": "securestring",
       "metadata": { "description": "The public endpoint URL of your Flask backend to send the identity metadata back to." }
     }
   },
   "variables": {
     "identityName": "SaaS-K8sOrchestrator-Identity",
-    "customRoleName": "[format('SaaS-DataCluster-Manager-{0}', uniqueString(subscription().subscriptionId))]"
+    "roleDefGuid": "[guid(subscription().id, parameters('aksResourceGroupName'), 'SaaS-DataCluster-Manager')]",
+    "customRoleName": "[format('SaaS-DataCluster-Manager-{0}', uniqueString(subscription().subscriptionId, parameters('aksResourceGroupName')))]",
+    "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('roleDefGuid'))]",
+    "rgId": "[subscriptionResourceId('Microsoft.Resources/resourceGroups', parameters('aksResourceGroupName'))]",
+    "saasIssuer": "[format('https://login.microsoftonline.com/{0}/v2.0', parameters('saasTenantId'))]"
   },
   "resources": [
     {
@@ -37,86 +45,110 @@
       "properties": {}
     },
     {
+      "type": "Microsoft.Authorization/roleDefinitions",
+      "apiVersion": "2022-04-01",
+      "name": "[variables('roleDefGuid')]",
+      "dependsOn": [
+        "[variables('rgId')]"
+      ],
+      "properties": {
+        "roleName": "[variables('customRoleName')]",
+        "description": "Custom role allowing minimal Databricks-like K8s infrastructure and data pod orchestration.",
+        "type": "CustomRole",
+        "permissions": [
+          {
+            "actions": [
+              "Microsoft.ContainerService/managedClusters/*",
+              "Microsoft.Compute/virtualMachines/*",
+              "Microsoft.Compute/virtualMachineScaleSets/*",
+              "Microsoft.Network/virtualNetworks/*",
+              "Microsoft.Network/networkInterfaces/*",
+              "Microsoft.ManagedIdentity/userAssignedIdentities/*",
+              "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/*",
+              "Microsoft.Authorization/roleAssignments/write",
+              "Microsoft.Authorization/roleAssignments/delete",
+              "Microsoft.Storage/storageAccounts/*"
+            ],
+            "notActions": [],
+            "dataActions": [
+              "Microsoft.ContainerService/managedClusters/pods/*",
+              "Microsoft.ContainerService/managedClusters/batch/jobs/*",
+              "Microsoft.ContainerService/managedClusters/namespaces/*",
+              "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/*"
+            ],
+            "notDataActions": []
+          }
+        ],
+        "assignableScopes": [
+          "[variables('rgId')]"
+        ]
+      }
+    },
+    {
       "type": "Microsoft.Resources/deployments",
       "apiVersion": "2023-07-01",
       "name": "saas-identity-and-roles-deployment",
       "resourceGroup": "[parameters('aksResourceGroupName')]",
       "dependsOn": [
-        "[parameters('aksResourceGroupName')]"
+        "[variables('rgId')]",
+        "[variables('roleDefinitionId')]"
       ],
       "properties": {
         "mode": "Incremental",
+        "expressionEvaluationOptions": { "scope": "inner" },
+        "parameters": {
+          "location": { "value": "[parameters('location')]" },
+          "identityName": { "value": "[variables('identityName')]" },
+          "roleDefinitionId": { "value": "[variables('roleDefinitionId')]" },
+          "saasIssuer": { "value": "[variables('saasIssuer')]" },
+          "saasSubject": { "value": "[parameters('saasServicePrincipalObjectId')]" },
+          "aksResourceGroupName": { "value": "[parameters('aksResourceGroupName')]" },
+          "aksClusterName": { "value": "[parameters('aksClusterName')]" },
+          "saasWebhookUrl": { "value": "[parameters('saasWebhookUrl')]" }
+        },
         "template": {
-          "$schema": "https://azure.com",
+          "$schema": "https://schema.management.azure.com/schema/2019-04-01/deploymentTemplate.json#",
           "contentVersion": "1.0.0.0",
+          "parameters": {
+            "location": { "type": "string" },
+            "identityName": { "type": "string" },
+            "roleDefinitionId": { "type": "string" },
+            "saasIssuer": { "type": "string" },
+            "saasSubject": { "type": "string" },
+            "aksResourceGroupName": { "type": "string" },
+            "aksClusterName": { "type": "string" },
+            "saasWebhookUrl": { "type": "securestring" }
+          },
           "resources": [
-            {
-              "type": "Microsoft.Authorization/roleDefinitions",
-              "apiVersion": "2022-04-01",
-              "name": "[guid(subscription().subscriptionId, variables('customRoleName'))]",
-              "properties": {
-                "roleName": "[variables('customRoleName')]",
-                "description": "Custom role allowing minimal Databricks-like K8s infrastructure and data pod orchestration.",
-                "type": "CustomRole",
-                "permissions": [
-                  {
-                    "actions": [
-                      "Microsoft.ContainerService/managedClusters/*",
-                      "Microsoft.Compute/virtualMachines/*",
-                      "Microsoft.Compute/virtualMachineScaleSets/*",
-                      "Microsoft.Network/virtualNetworks/*",
-                      "Microsoft.Network/networkInterfaces/*",
-                      "Microsoft.ManagedIdentity/userAssignedIdentities/*",
-                      "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/*",
-                      "Microsoft.Authorization/roleAssignments/write",
-                      "Microsoft.Authorization/roleAssignments/delete",
-                      "Microsoft.Storage/storageAccounts/*"
-                    ],
-                    "notActions": [],
-                    "dataActions": [
-                      "Microsoft.ContainerService/managedClusters/pods/*",
-                      "Microsoft.ContainerService/managedClusters/jobs/*",
-                      "Microsoft.ContainerService/managedClusters/namespaces/*",
-                      "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/*"
-                    ],
-                    "notDataActions": []
-                  }
-                ],
-                "assignableScopes": [
-                  "[subscription().id]"
-                ]
-              }
-            },
             {
               "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
               "apiVersion": "2023-01-31",
-              "name": "[variables('identityName')]",
+              "name": "[parameters('identityName')]",
               "location": "[parameters('location')]"
             },
             {
               "type": "Microsoft.Authorization/roleAssignments",
               "apiVersion": "2022-04-01",
-              "name": "[guid(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName')), 'customRoleAssignment')]",
+              "name": "[guid(resourceGroup().id, parameters('identityName'), parameters('roleDefinitionId'))]",
               "dependsOn": [
-                "[variables('identityName')]",
-                "[guid(subscription().subscriptionId, variables('customRoleName'))]"
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('identityName'))]"
               ],
               "properties": {
-                "roleDefinitionId": "[tenantResourceId('Microsoft.Authorization/roleDefinitions', guid(subscription().subscriptionId, variables('customRoleName')))]",
-                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName')), '2023-01-31').principalId]",
+                "roleDefinitionId": "[parameters('roleDefinitionId')]",
+                "principalId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('identityName')), '2023-01-31').principalId]",
                 "principalType": "ServicePrincipal"
               }
             },
             {
               "type": "Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials",
               "apiVersion": "2023-01-31",
-              "name": "[format('{0}/SaaSDataOrchestrationTrust', variables('identityName'))]",
+              "name": "[format('{0}/SaaSDataOrchestrationTrust', parameters('identityName'))]",
               "dependsOn": [
-                "[variables('identityName')]"
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('identityName'))]"
               ],
               "properties": {
-                "issuer": "[format('https://microsoftonline.com{0}/v2.0', tenant().tenantId)]",
-                "subject": "[parameters('saasApplicationClientId')]",
+                "issuer": "[parameters('saasIssuer')]",
+                "subject": "[parameters('saasSubject')]",
                 "audiences": [
                   "api://AzureADTokenExchange"
                 ]
@@ -129,7 +161,8 @@
               "location": "[parameters('location')]",
               "kind": "AzureCLI",
               "dependsOn": [
-                "[variables('identityName')]"
+                "[resourceId('Microsoft.Authorization/roleAssignments', guid(resourceGroup().id, parameters('identityName'), parameters('roleDefinitionId')))]",
+                "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials', parameters('identityName'), 'SaaSDataOrchestrationTrust')]"
               ],
               "properties": {
                 "azCliVersion": "2.50.0",
@@ -137,39 +170,21 @@
                 "retentionInterval": "P1D",
                 "cleanupPreference": "Always",
                 "environmentVariables": [
-                  {
-                    "name": "WEBHOOK_URL",
-                    "value": "[parameters('saasWebhookUrl')]"
-                  },
-                  {
-                    "name": "TENANT_ID",
-                    "value": "[tenant().tenantId]"
-                  },
-                  {
-                    "name": "SUB_ID",
-                    "value": "[subscription().subscriptionId]"
-                  },
-                  {
-                    "name": "CLIENT_ID",
-                    "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName')), '2023-01-31').clientId]"
-                  },
-                  {
-                    "name": "RG_NAME",
-                    "value": "[parameters('aksResourceGroupName')]"
-                  },
-                  {
-                    "name": "CLUSTER_NAME",
-                    "value": "[parameters('aksClusterName')]"
-                  }
+                  { "name": "WEBHOOK_URL", "secureValue": "[parameters('saasWebhookUrl')]" },
+                  { "name": "TENANT_ID", "value": "[tenant().tenantId]" },
+                  { "name": "SUB_ID", "value": "[subscription().subscriptionId]" },
+                  { "name": "CLIENT_ID", "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('identityName')), '2023-01-31').clientId]" },
+                  { "name": "RG_NAME", "value": "[parameters('aksResourceGroupName')]" },
+                  { "name": "CLUSTER_NAME", "value": "[parameters('aksClusterName')]" }
                 ],
-                "scriptContent": "az login --identity && curl -X POST -H 'Content-Type: application/json' -d \"{\\\"azureTenantId\\\":\\\"$TENANT_ID\\\",\\\"azureSubscriptionId\\\":\\\"$SUB_ID\\\",\\\"managedIdentityClientId\\\":\\\"$CLIENT_ID\\\",\\\"targetResourceGroup\\\":\\\"$RG_NAME\\\",\\\"targetClusterName\\\":\\\"$CLUSTER_NAME\\\"}\" $WEBHOOK_URL"
+                "scriptContent": "curl -fsS --retry 5 --retry-delay 5 -X POST -H 'Content-Type: application/json' -d \"{\\\"azureTenantId\\\":\\\"$TENANT_ID\\\",\\\"azureSubscriptionId\\\":\\\"$SUB_ID\\\",\\\"managedIdentityClientId\\\":\\\"$CLIENT_ID\\\",\\\"targetResourceGroup\\\":\\\"$RG_NAME\\\",\\\"targetClusterName\\\":\\\"$CLUSTER_NAME\\\"}\" \"$WEBHOOK_URL\""
               }
             }
           ],
           "outputs": {
             "clientId": {
               "type": "string",
-              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName')), '2023-01-31').clientId]"
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', parameters('identityName')), '2023-01-31').clientId]"
             }
           }
         }
